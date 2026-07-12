@@ -17,8 +17,8 @@ public class TaskService(ApplicationDbContext dbContext) : ITaskService
             return new Response<string>(HttpStatusCode.BadRequest, "Title is required");
         }
 
-        var maxOrderIndex = await context.Tasks.MaxAsync(t => (int?)t.OrderIndex) ?? 0;
-        var utcNow = DateTime.UtcNow;
+        int? maxOrderIndexNullable = await context.Tasks.MaxAsync(t => (int?)t.OrderIndex);
+        int maxOrderIndex = maxOrderIndexNullable ?? 0;
 
         var task = new TaskEntity
         {
@@ -26,8 +26,8 @@ public class TaskService(ApplicationDbContext dbContext) : ITaskService
             Description = dto.Description,
             Status = dto.Status,
             OrderIndex = maxOrderIndex + 1,
-            CreatedAt = utcNow,
-            UpdatedAt = utcNow
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
         };
 
         await context.Tasks.AddAsync(task);
@@ -48,12 +48,12 @@ public class TaskService(ApplicationDbContext dbContext) : ITaskService
         return new Response<string>(HttpStatusCode.OK, "Deleted Task successfully");
     }
 
-    public async Task<PagedResult<TaskEntity>> GetAllAsync(TaskStatusFilter filter, int page, int pageSize)
+    public async Task<PagedResult<TaskEntity>> GetAllAsync(TaskStatusFilter filter, PagedQuery pagedQuery)
     {
-        if (page < 1) page = 1;
-        if (pageSize < 1) pageSize = 10;
+        if (pagedQuery.Page < 1) pagedQuery.Page = 1;
+        if (pagedQuery.PageSize < 1) pagedQuery.PageSize = 10;
 
-        var query = context.Tasks.AsQueryable();
+        var query = context.Tasks.AsNoTracking().AsQueryable();
 
         if (filter != null && filter.Status != null)
         {
@@ -65,23 +65,23 @@ public class TaskService(ApplicationDbContext dbContext) : ITaskService
         var items = await query
             .OrderBy(t => t.OrderIndex)
             .ThenBy(t => t.Id)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
+            .Skip((pagedQuery.Page - 1) * pagedQuery.PageSize)
+            .Take(pagedQuery.PageSize)
             .ToListAsync();
 
         return new PagedResult<TaskEntity>
         {
             Items = items,
-            Page = page,
-            PageSize = pageSize,
+            Page = pagedQuery.Page,
+            PageSize = pagedQuery.PageSize,
             TotalCount = totalCount,
-            TotalPages = (int)Math.Ceiling(totalCount / (double)pageSize)
+            TotalPages = (int)Math.Ceiling(totalCount / (double)pagedQuery.PageSize)
         };
     }
 
     public async Task<Response<TaskEntity>> GetByIdAsync(int id)
     {
-        var get = await context.Tasks.FindAsync(id);
+        var get = await context.Tasks.AsNoTracking().FirstOrDefaultAsync(t => t.Id == id);
         if (get == null)
         {
             return new Response<TaskEntity>(HttpStatusCode.NotFound, "Task not found");
@@ -92,6 +92,11 @@ public class TaskService(ApplicationDbContext dbContext) : ITaskService
 
     public async Task<Response<string>> UpdateAsync(int id, TaskDTO dto)
     {
+        if (string.IsNullOrWhiteSpace(dto.Title))
+        {
+            return new Response<string>(HttpStatusCode.BadRequest, "Title is required");
+        }
+
         var update = await context.Tasks.FindAsync(id);
         if (update == null)
         {
@@ -104,11 +109,16 @@ public class TaskService(ApplicationDbContext dbContext) : ITaskService
         update.UpdatedAt = DateTime.UtcNow;
 
         await context.SaveChangesAsync();
-        return new Response<string>(HttpStatusCode.OK, "ok");
+        return new Response<string>(HttpStatusCode.OK, "Update Task successfully");
     }
 
     public async Task<Response<string>> UpdateStatusAsync(int id, TaskEnum status)
     {
+        if (!Enum.IsDefined(typeof(TaskEnum), status))
+        {
+            return new Response<string>(HttpStatusCode.BadRequest, "Invalid status");
+        }
+
         var update = await context.Tasks.FindAsync(id);
         if (update == null)
         {
@@ -122,11 +132,11 @@ public class TaskService(ApplicationDbContext dbContext) : ITaskService
         return new Response<string>(HttpStatusCode.OK, "Status updated successfully");
     }
 
-    public async Task<Response<string>> ReorderAsync(List<TaskDTO> items)
+    public async Task<Response<string>> ReorderAsync(List<TaskReorderDto> items)
     {
         if (items == null || items.Count == 0)
         {
-            return new Response<string>(HttpStatusCode.BadRequest, "Reorder list is empty");
+            return new Response<string>(HttpStatusCode.BadRequest, "List reorder is empty");
         }
 
         var taskIds = items.Select(i => i.Id).ToList();
@@ -136,16 +146,20 @@ public class TaskService(ApplicationDbContext dbContext) : ITaskService
 
         if (tasks.Count != items.Count)
         {
-            return new Response<string>(HttpStatusCode.NotFound, "One or more tasks not found");
+            return new Response<string>(HttpStatusCode.NotFound, "Some tasks not found");
         }
 
-        var orderById = items.ToDictionary(i => i.Id, i => i.OrderIndex);
         var utcNow = DateTime.UtcNow;
 
         foreach (var task in tasks)
         {
-            task.OrderIndex = orderById[task.Id];
-            task.UpdatedAt = utcNow;
+            var matchingItem = items.FirstOrDefault(i => i.Id == task.Id);
+
+            if (matchingItem != null)
+            {
+                task.OrderIndex = matchingItem.OrderIndex;
+                task.UpdatedAt = utcNow;
+            }
         }
 
         await context.SaveChangesAsync();
